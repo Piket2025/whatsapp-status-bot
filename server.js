@@ -6,23 +6,31 @@ const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 
 const SPREADSHEET_ID = '154_bycpQeugA5UJDXvaoE9F1klESUxj-mQOBPxgoFjU';
-const SHEET_NAME = 'Detail';
+const SHEET_NAME = 'Detail'; // Nama sheet yang digunakan
+
+// Ambil isi credentials dari environment variable
+const rawCredentials = process.env.GOOGLE_CREDENTIALS;
+const credentials = JSON.parse(rawCredentials);
 
 const auth = new google.auth.GoogleAuth({
-  credentials: JSON.parse(process.env.GOOGLE_CREDENTIALS),
+  credentials,
   scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
 });
 
-let lastSender = null;
-let currentPage = 0;
-const pageSize = 10;
-
 app.post('/webhook', async (req, res) => {
-  const message = (req.body.Body || '').trim();
+  const message = req.body.Body || '';
   const sender = req.body.From;
   console.log(`Pesan masuk dari ${sender}: ${message}`);
 
-  res.set('Content-Type', 'text/xml');
+  if (!message.startsWith('STATUS:')) {
+    res.set('Content-Type', 'text/xml');
+    return res.send(`
+      <Response>
+        <Message>Format salah. Gunakan: STATUS:&lt;ID_TIKET&gt; atau STATUS:OPEN</Message>
+      </Response>`);
+  }
+
+  const tiketID = message.split(':')[1].trim().toUpperCase();
 
   try {
     const client = await auth.getClient();
@@ -34,97 +42,53 @@ app.post('/webhook', async (req, res) => {
     });
 
     const rows = result.data.values;
+    res.set('Content-Type', 'text/xml');
+
     if (!rows || rows.length === 0) {
-      return res.send(`<Response><Message>Sheet kosong.</Message></Response>`);
+      return res.send(`<Response><Message>Data sheet kosong.</Message></Response>`);
     }
 
-    // STATUS:OPEN
-    if (message.toUpperCase() === 'STATUS:OPEN') {
+    if (tiketID === 'OPEN') {
       const openTickets = rows.filter(row => row[8]?.toLowerCase() === 'open');
+
       if (openTickets.length === 0) {
-        return res.send(`<Response><Message>Tidak ada tiket OPEN.</Message></Response>`);
+        return res.send(`<Response><Message>Tidak ada tiket yang berstatus OPEN.</Message></Response>`);
       }
 
-      lastSender = sender;
-      currentPage = 0;
+      const list = openTickets.slice(0, 5).map(row => {
+        return `- ${row[1]} | ${row[3]} | KP ${row[10] || '-'}`;
+      }).join('\n');
 
-      const page = openTickets.slice(0, pageSize).map(row => `- ${row[1]} | ${row[3]} | KP ${row[10] || '-'}`).join('\n');
-      return res.send(`<Response><Message>Berikut tiket OPEN:\n${page}\n\nKetik NEXT untuk lanjut.</Message></Response>`);
+      return res.send(`<Response><Message>Berikut 5 tiket OPEN:\n${list}</Message></Response>`);
     }
 
-    // STATUS:CLOSED
-    if (message.toUpperCase() === 'STATUS:CLOSED') {
-      const closedTickets = rows.filter(row => row[8]?.toLowerCase() === 'closed');
-      if (closedTickets.length === 0) {
-        return res.send(`<Response><Message>Tidak ada tiket CLOSED.</Message></Response>`);
-      }
+    const data = rows.find(row => row[1]?.toUpperCase() === tiketID);
 
-      lastSender = sender;
-      currentPage = 0;
+    if (data) {
+      const [, idTiket, sid, deskripsi, namaTim, tglTiket, tglClose, jenisAktifitas, manHours, status, kp] = data;
 
-      const page = closedTickets.slice(0, pageSize).map(row => `- ${row[1]} | ${row[3]} | KP ${row[10] || '-'}`).join('\n');
-      return res.send(`<Response><Message>Berikut tiket CLOSED:\n${page}\n\nKetik NEXT untuk lanjut.</Message></Response>`);
-    }
-
-    // STATUS:ALL
-    if (message.toUpperCase() === 'STATUS:ALL') {
-      lastSender = sender;
-      currentPage = 0;
-
-      const page = rows.slice(0, pageSize).map(row => `- ${row[1]} | ${row[3]} | Status: ${row[8]} | KP ${row[10] || '-'}`).join('\n');
-      return res.send(`<Response><Message>Berikut semua tiket:\n${page}\n\nKetik NEXT untuk lanjut.</Message></Response>`);
-    }
-
-    // NEXT
-    if (message.toUpperCase() === 'NEXT') {
-      if (sender !== lastSender) {
-        return res.send(`<Response><Message>Silakan mulai dengan STATUS:OPEN atau STATUS:CLOSED dulu.</Message></Response>`);
-      }
-
-      currentPage++;
-      const start = currentPage * pageSize;
-      const end = start + pageSize;
-      const page = rows.slice(start, end);
-
-      if (page.length === 0) {
-        return res.send(`<Response><Message>Tidak ada data lagi.</Message></Response>`);
-      }
-
-      const formatted = page.map(row => `- ${row[1]} | ${row[3]} | Status: ${row[8]} | KP ${row[10] || '-'}`).join('\n');
-      return res.send(`<Response><Message>Halaman ${currentPage + 1}:\n${formatted}\n\nKetik NEXT lagi untuk lanjut.</Message></Response>`);
-    }
-
-    // STATUS:<ID>
-    if (message.toUpperCase().startsWith('STATUS:')) {
-      const tiketID = message.split(':')[1].trim().toUpperCase();
-      const row = rows.find(r => r[1]?.toUpperCase() === tiketID);
-
-      if (!row) {
-        return res.send(`<Response><Message>Tiket ${tiketID} tidak ditemukan.</Message></Response>`);
-      }
-
-      const [ , idTiket, sid, deskripsi, namaTim, tglTiket, tglClose, jenisAktifitas, manHours, status, kp] = row;
       return res.send(`<Response><Message>
 Tiket: ${idTiket}
 SID: ${sid}
 Deskripsi: ${deskripsi}
-Tim: ${namaTim}
-Tgl Tiket: ${tglTiket}
-Tgl Close: ${tglClose}
-Aktivitas: ${jenisAktifitas}
+Nama Tim: ${namaTim}
+Tanggal Tiket: ${tglTiket}
+Tanggal Close: ${tglClose}
+Jenis Aktivitas: ${jenisAktifitas}
 Durasi: ${manHours} jam
 Status: ${status}
 KP: ${kp}
       </Message></Response>`);
+    } else {
+      return res.send(`<Response><Message>Tiket ${tiketID} tidak ditemukan.</Message></Response>`);
     }
-
-    return res.send(`<Response><Message>Format tidak dikenali. Gunakan STATUS:OPEN, STATUS:CLOSED, STATUS:ALL, atau STATUS:<ID>.</Message></Response>`);
   } catch (err) {
-    console.error('❌ ERROR:', err.message);
-    return res.status(500).send(`<Response><Message>Terjadi kesalahan saat mengambil data.</Message></Response>`);
+    console.error('Gagal ambil data dari Spreadsheet:', err.message);
+    res.set('Content-Type', 'text/xml');
+    res.status(500).send(`<Response><Message>Terjadi kesalahan saat mengambil data.</Message></Response>`);
   }
 });
 
-app.listen(process.env.PORT || 3000, () => {
+app.listen(3000, () => {
   console.log('✅ Bot aktif di http://localhost:3000');
 });
